@@ -36,7 +36,7 @@ headers = {
 }
 
 # =======================================================
-# Função para Requisição Segura (AGORA COM GET)
+# Função para Requisição Segura
 # =======================================================
 def make_safe_request(url, payload, attempt=1, max_attempts=3):
     try:
@@ -45,7 +45,6 @@ def make_safe_request(url, payload, attempt=1, max_attempts=3):
             json=payload,
             headers=headers,
             timeout=(10, 30)
-        )
         response.raise_for_status()
         return response.json()
     
@@ -68,31 +67,24 @@ def main():
     try:
         url_corretor = "https://coelho.cvcrm.com.br/api/v1/cvdw/corretores"
         
-        # 1. Primeira requisição (via GET)
+        # 1. Coleta de dados
         print("⏳ Obtendo metadados...")
         initial_data = make_safe_request(
             url_corretor,
-            payload={
-                "pagina": 1,
-                "registros_por_pagina": 500
-            }
+            payload={"pagina": 1, "registros_por_pagina": 500}
         )
 
         paginas_corretor = initial_data.get('total_de_paginas', 1)
         print(f"📊 Total de páginas: {paginas_corretor}")
 
-        # 2. Coleta de dados paginados
+        # 2. Coleta paginada
         dfs = [pd.DataFrame(initial_data['dados'])]
         
         for pagina in range(2, paginas_corretor + 1):
             print(f"🔍 Processando página {pagina}/{paginas_corretor}...")
-            
             page_data = make_safe_request(
                 url_corretor,
-                payload={
-                    "pagina": pagina,
-                    "registros_por_pagina": 500
-                }
+                payload={"pagina": pagina, "registros_por_pagina": 500}
             )
             dfs.append(pd.DataFrame(page_data['dados']))
             time.sleep(1)
@@ -100,19 +92,35 @@ def main():
         # 3. Processamento final
         df_corretor = pd.concat(dfs, ignore_index=True)
         df_corretor = df_corretor[['idcorretor', 'ativo_login', 'nome', 'documento', 'data_cad', 'idimobiliaria']].copy()
-        print(f"✅ Dados consolidados! Total de registros: {len(df_corretor)}")
-
-        # 4. Conversão para lista de dicionários (formato esperado pelo Supabase)
+        
+        # 4. CONVERSÃO PARA STRING (CRÍTICO)
+        df_corretor = df_corretor.astype(str)  # Converte TODAS as colunas para string
+        
+        # 5. Tratamento de valores nulos/vazios
+        df_corretor = df_corretor.fillna('')
+        
+        # 6. Conversão para formato do Supabase
         dados_para_inserir = df_corretor.to_dict('records')
         
-        # 5. Inserção no Supabase
-        print("⏳ Inserindo dados no Supabase...")
-        response = supabase.table("d_Corretores").insert(dados_para_inserir).execute()
+        # DEBUG: Verifique os primeiros registros
+        print("🔍 Dados preparados para inserção (amostra):")
+        print(dados_para_inserir[:2])
+
+        # 7. Inserção no Supabase (em lotes de 100)
+        batch_size = 100
+        total_registros = len(dados_para_inserir)
         
-        if hasattr(response, 'error') and response.error:
-            print(f"❌ Erro ao inserir dados: {response.error}")
-        else:
-            print(f"🎉 Dados inseridos com sucesso! Total: {len(dados_para_inserir)} registros")
+        for i in range(0, total_registros, batch_size):
+            batch = dados_para_inserir[i:i + batch_size]
+            print(f"⏳ Inserindo lote {i//batch_size + 1}...")
+            response = supabase.table("d_Corretores").insert(batch).execute()
+            
+            if hasattr(response, 'error') and response.error:
+                print(f"❌ Erro no lote {i//batch_size + 1}: {response.error}")
+            else:
+                print(f"✅ Lote {i//batch_size + 1} inserido (registros {i}-{min(i+batch_size, total_registros)})")
+
+        print(f"🎉 Concluído! Total de registros processados: {total_registros}")
 
     except Exception as e:
         print(f"❌ Falha crítica: {str(e)}")
