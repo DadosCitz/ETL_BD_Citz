@@ -6,6 +6,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from supabase import create_client
 import json
+from datetime import datetime
 
 # =======================================================
 # Configuração do Supabase
@@ -14,6 +15,7 @@ SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_KEY"]
 API_TOKEN = os.environ["API_TOKEN"]
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+tabela = supabase.schema("Comercial_Citz").table("d_Corretores")
 
 # =======================================================
 # Configuração da Sessão HTTP
@@ -26,10 +28,10 @@ retry_strategy = Retry(
 )
 session.mount('https://', HTTPAdapter(max_retries=retry_strategy))
 
-# Headers da API (substitua com seus dados reais)
+# Headers da API
 headers = {
     "accept": "application/json",
-    "email":"thiago.almeida@citz.co",
+    "email": "thiago.almeida@citz.co",
     "token": API_TOKEN,
     "content-type": "application/json"
 }
@@ -45,10 +47,8 @@ def make_safe_request(url, payload, attempt=1, max_attempts=3):
             json=payload,
             headers=headers,
             timeout=(10, 30)
-        )
         response.raise_for_status()
         return response.json()
-    
     except requests.exceptions.Timeout:
         if attempt < max_attempts:
             wait_time = 2 ** attempt
@@ -56,7 +56,6 @@ def make_safe_request(url, payload, attempt=1, max_attempts=3):
             time.sleep(wait_time)
             return make_safe_request(url, payload, attempt+1, max_attempts)
         raise
-        
     except requests.exceptions.RequestException as e:
         print(f"Erro na requisição: {str(e)}")
         raise
@@ -73,22 +72,22 @@ def prepare_data(df):
     
     # Remover caracteres problemáticos
     df = df.applymap(lambda x: x.replace('\x00', '') if isinstance(x, str) else x)
-    
     return df
 
-def insert_batch(table, batch):
-    """Tenta inserir um lote com tratamento de erros"""
+def upsert_batch(table, batch):
+    """Faz upsert de um lote de registros"""
     try:
         # Teste de serialização JSON
         json.dumps(batch)
         
-        response = table.insert(batch).execute()
+        response = table.upsert(batch, on_conflict=['idcorretor']).execute()
+        
         if hasattr(response, 'error') and response.error:
-            print(f"❌ Erro no lote: {response.error}")
+            print(f"❌ Erro no upsert: {response.error}")
             return False
         return True
     except Exception as e:
-        print(f"❌ Erro crítico: {str(e)}")
+        print(f"❌ Erro crítico no upsert: {str(e)}")
         print("Registro problemático:", batch[0] if batch else "Nenhum")
         return False
 
@@ -97,8 +96,9 @@ def insert_batch(table, batch):
 # =======================================================
 def main():
     try:
+        print(f"⏳ Iniciando sincronização em {datetime.now().isoformat()}")
+        
         # 1. Coleta de dados da API
-        print("⏳ Iniciando coleta de dados...")
         url_corretor = "https://coelho.cvcrm.com.br/api/v1/cvdw/corretores"
         
         # Primeira requisição para pegar metadados
@@ -129,28 +129,25 @@ def main():
         print("🔍 Dados processados (amostra):")
         print(df_corretor.head(2))
 
-        # 3. Conexão com a tabela no schema correto
-        tabela = supabase.schema("Comercial_Citz").table("d_Corretores")
-        
-        # 4. Inserção em lotes com fallback
+        # 3. Upsert em lotes
         batch_size = 50
         dados = df_corretor.to_dict('records')
         total_registros = len(dados)
         
-        print(f"🚀 Preparando inserir {total_registros} registros...")
+        print(f"🚀 Preparando upsert de {total_registros} registros...")
         
         for i in range(0, total_registros, batch_size):
             batch = dados[i:i + batch_size]
             print(f"⏳ Lote {i//batch_size + 1} ({len(batch)} registros)...")
             
-            if not insert_batch(tabela, batch):
-                # Fallback: inserção individual
-                print("⚠️ Tentando inserir registro por registro...")
+            if not upsert_batch(tabela, batch):
+                # Fallback: upsert individual
+                print("⚠️ Tentando upsert registro por registro...")
                 for record in batch:
-                    if not insert_batch(tabela, [record]):
+                    if not upsert_batch(tabela, [record]):
                         print(f"❌ Falha persistente no registro: {record.get('idcorretor')}")
 
-        print(f"🎉 Processo concluído! Total: {total_registros} registros")
+        print(f"🎉 Processo concluído! Total de registros processados: {total_registros}")
 
     except Exception as e:
         print(f"❌ Falha crítica no processo principal: {str(e)}")
