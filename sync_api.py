@@ -44,7 +44,7 @@ def make_safe_request(url, payload, attempt=1, max_attempts=3):
             url,
             json=payload,
             headers=headers,
-            timeout=(10, 30)
+            timeout=(10, 30))
         response.raise_for_status()
         return response.json()
     
