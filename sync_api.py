@@ -15,7 +15,7 @@ SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_KEY"]
 API_TOKEN = os.environ["API_TOKEN"]
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-tabela = supabase.schema("Comercial_Citz").table("d_Corretores")
+tabela = supabase.schema("Comercial_Citz").table("d_corretores")
 
 # =======================================================
 # Configuração da Sessão HTTP
@@ -28,7 +28,6 @@ retry_strategy = Retry(
 )
 session.mount('https://', HTTPAdapter(max_retries=retry_strategy))
 
-# Headers da API
 headers = {
     "accept": "application/json",
     "email": "thiago.almeida@citz.co",
@@ -37,7 +36,7 @@ headers = {
 }
 
 # =======================================================
-# Funções Auxiliares
+# Funções Auxiliares (MODIFICADAS)
 # =======================================================
 def make_safe_request(url, payload, attempt=1, max_attempts=3):
     """Faz requisições HTTP com tratamento de erros e retry"""
@@ -61,14 +60,22 @@ def make_safe_request(url, payload, attempt=1, max_attempts=3):
         raise
 
 def prepare_data(df):
-    """Prepara os dados para o Supabase"""
+    """Prepara os dados para o Supabase com tratamento especial para datas"""
     # Converter tudo para string e tratar nulos
     df = df.astype(str).fillna('')
     
-    # Tratamento especial para datas
-    date_cols = [col for col in df.columns if 'data' in col.lower()]
-    for col in date_cols:
-        df[col] = pd.to_datetime(df[col]).dt.strftime('%Y-%m-%d %H:%M:%S')
+    # Tratamento ESPECIAL para data_cad (convertendo para formato ISO com timezone)
+    if 'data_cad' in df.columns:
+        df['data_cad'] = pd.to_datetime(df['data_cad'], errors='coerce')
+        # Remove timezone se existir e formata para ISO sem timezone
+        df['data_cad'] = df['data_cad'].apply(
+            lambda x: x.isoformat() if not pd.isna(x) else None
+        )
+    
+    # Tratamento para outras colunas de data (se houver)
+    other_date_cols = [col for col in df.columns if 'data' in col.lower() and col != 'data_cad']
+    for col in other_date_cols:
+        df[col] = pd.to_datetime(df[col], errors='coerce').dt.strftime('%Y-%m-%d %H:%M:%S')
     
     # Remover caracteres problemáticos
     df = df.applymap(lambda x: x.replace('\x00', '') if isinstance(x, str) else x)
@@ -92,7 +99,7 @@ def upsert_batch(table, batch):
         return False
 
 # =======================================================
-# Função Principal
+# Função Principal (MANTIDA)
 # =======================================================
 def main():
     try:
@@ -101,13 +108,11 @@ def main():
         # 1. Coleta de dados da API
         url_corretor = "https://coelho.cvcrm.com.br/api/v1/cvdw/corretores"
         
-        # Primeira requisição para pegar metadados
         initial_data = make_safe_request(
             url_corretor,
             payload={"pagina": 1, "registros_por_pagina": 500}
         )
         
-        # Coleta paginada
         dfs = [pd.DataFrame(initial_data['dados'])]
         total_pages = initial_data.get('total_de_paginas', 1)
         
@@ -118,7 +123,7 @@ def main():
                 payload={"pagina": page, "registros_por_pagina": 500}
             )
             dfs.append(pd.DataFrame(page_data['dados']))
-            time.sleep(1)  # Evitar rate limit
+            time.sleep(1)
 
         # 2. Processamento dos dados
         df_corretor = pd.concat(dfs, ignore_index=True)
@@ -141,7 +146,6 @@ def main():
             print(f"⏳ Lote {i//batch_size + 1} ({len(batch)} registros)...")
             
             if not upsert_batch(tabela, batch):
-                # Fallback: upsert individual
                 print("⚠️ Tentando upsert registro por registro...")
                 for record in batch:
                     if not upsert_batch(tabela, [record]):
